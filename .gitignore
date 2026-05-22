@@ -1,0 +1,34 @@
+# Python/cache artifacts
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Local environments
+.venv/
+venv/
+env/
+
+# Data, checkpoints, experiment outputs
+data/
+data-model/
+data-model-*/
+ablations/
+logs/
+wandb/
+*.pt
+*.pth
+*.ckpt
+*.pickle
+*.pkl
+*.npy
+*.npz
+*.bin
+*.tar
+*.tar.gz
+*.zip
+*.ipynb
+
+# Local machine/editor files
+.DS_Store
+.idea/
+.vscode/
