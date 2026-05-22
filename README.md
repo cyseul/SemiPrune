@@ -1,123 +1,230 @@
 # SemiPrune
 
-<<<<<<< HEAD
-This repository provides an implementation of SemiPrune, a label-efficient dataset pruning framework that enables existing supervised pruning methods to be applied without full annotation.
+SemiPrune is research code for semi-supervised pseudo-labeling, importance-score generation, and subset training experiments. The typical workflow is:
 
-SemiPrune first uses a small randomly labeled subset to train a semi-supervised learning model and generate pseudo-labels for unlabeled data. It then applies supervised pruning methods to the resulting pseudo-labeled training pool.
-=======
-Research code for SSL-based pseudo-labeling, importance-score generation, and coreset training experiments on CIFAR, TinyImageNet, ImageNet, and related vision datasets.
-
-## Overview
-
-This repository contains two connected experiment pipelines:
-
-1. Our experiments first run SSL to obtain pseudo-labels or SSL-trained representations.
-2. ELFS generates pseudo-labels with an embedding + clustering-head pipeline, then uses those pseudo-labels to collect proxy training dynamics and select a coreset.
-
+1. Generate pseudo-labels with an SSL or label-free pipeline.
+2. Train a proxy classifier with pseudo-labels and save training dynamics.
+3. Generate importance scores from the proxy training dynamics.
+4. Train a final model on a selected subset.
 
 ## Environment
-Create the conda environment from the provided file:
 
 ```bash
 conda env create -f requirements.yml
 conda activate elfs
 ```
 
-The environment is CUDA-oriented and includes PyTorch, torchvision, faiss, scikit-learn, pandas, matplotlib, and related experiment utilities.
+Some ELFS-style clustering scripts import `augs.augs`; make sure that module is available in this repository or on `PYTHONPATH`.
 
-Some scripts import `augs.augs`; make sure that module is available in this project or on `PYTHONPATH` before running clustering-head training.
+## Pseudo-Label Sources
 
-## Repository Layout
+For semi-supervised learning, we used [microsoft/Semi-supervised-learning](https://github.com/microsoft/Semi-supervised-learning.git) to train SSL models and export pseudo-labels. Those pseudo-label files are consumed here with `--load-pseudo`.
+
+ELFS is used as another label-free baseline and is described in the ELFS section below.
+
+## Supported Training Datasets
+
+`train.py` supports:
 
 ```text
-.
-├── train.py                         # supervised classifier training with optional coreset selection
-├── train_imagenet.py                # ImageNet-style supervised training variant
-├── generate_importance_score.py     # importance-score generation from training dynamics or embeddings
-├── generate_importance_score_imagenet.py
-├── gen_embeds.py                    # precompute embeddings, labels, KNN, mean/std
-├── train_cluster_heads.py           # teacher-student clustering-head training
-├── eval_cluster.py                  # evaluate cluster checkpoints and save pseudo-labels
-├── baseline_kmeans.py               # K-Means baseline on embeddings
-├── linear_evaluation.py             # linear/MLP evaluation on frozen backbones
-├── corrupt-cifar.py                 # generate corrupted CIFAR-100 training data
-├── corrupt-tiny.py                  # generate corrupted TinyImageNet-style data
-├── core/                            # datasets, model generators, training utilities
-├── loaders/                         # embedding/image dataset loaders
-├── losses/                          # clustering/self-training losses
-└── model_builders/                  # backbone and multi-head model builders
+caltech101, food101, sun397, cub200,
+cifar10, cifar100, cifar10-C, cifar100-C, cifar100-LT,
+tiny-imagenet, svhn, cinic10, stl10
 ```
 
-## Data
+Extra dataset-specific flags:
 
-Default dataset roots vary by script:
+- `cifar10-C`: pass `--cifar10-c-path`.
+- `cifar100-C`: pass `--cifar100-c-path` if the default path is not valid.
+- `cifar100-LT`: pass `--lt-if 0.1` or `--lt-if 0.01`.
+- `caltech101`: optionally pass `--caltech-split-path`; otherwise the split is resolved from `--data-dir` and `--caltech-split-seed`.
 
-- Supervised training scripts generally use `--data-dir ../data/`.
-- Generated embeddings are saved under `data/embeddings/<dataset>-<arch>/` by default.
-- Training outputs are saved under the user-provided `--base-dir/--task-name` or `--output_dir`.
+`train_imagenet.py` supports:
 
-Common supported datasets include CIFAR10, CIFAR100, CIFAR10-C, CIFAR100-C, CIFAR100-LT, STL10, SVHN, CINIC10, TinyImageNet, Caltech101, Food101, SUN397, DTD, EuroSAT, and ImageNet-1K.
+```text
+imagenet
+```
 
-## Our Workflow
+The ImageNet directory should contain `train/` and `val/`.
 
-For our experiments, run the SSL pipeline first. The SSL outputs should provide the pseudo-labels used for downstream training-dynamics collection and coreset selection.
+## Train with Pseudo-Labels
 
-After SSL pseudo-labels are available, use the supervised training and score-generation scripts in this repository with `--load-pseudo`:
+Use `--load-pseudo` to replace the dataset labels with pseudo-labels. The pseudo-labels can come from the Microsoft semi-supervised learning codebase or from the ELFS baseline. For `train.py`, pass both train and test pseudo-labels if you want validation/test to use pseudo-labels too.
 
 ```bash
 python train.py \
-  --dataset cifar10 \
+  --dataset cifar100 \
+  --data-dir ../data \
+  --base-dir ./data-model/cifar100 \
+  --task-name pseudo-rn18-200ep-full \
   --gpuid 0 \
   --epochs 200 \
   --lr 0.1 \
   --network resnet18 \
   --batch-size 128 \
-  --task-name ssl-pseudo-all-data \
-  --base-dir ./data-model/cifar10 \
   --load-pseudo \
-  --pseudo-train-label-path <path-to-ssl-pseudo-label.pt> \
-  --pseudo-test-label-path <path-to-ssl-pseudo-label-test.pt>
+  --pseudo-train-label-path <path-to-pseudo-train-labels.pt> \
+  --pseudo-test-label-path <path-to-pseudo-test-labels.pt>
 ```
 
-Then calculate the importance score:
+For ImageNet:
+
+```bash
+python train_imagenet.py \
+  --dataset imagenet \
+  --data-dir <path-to-imagenet-root> \
+  --base-dir ./data-model/imagenet \
+  --task-name pseudo-rn34-60ep-full \
+  --gpuid 0,1 \
+  --epochs 60 \
+  --lr 0.1 \
+  --scheduler cosine \
+  --network resnet34 \
+  --batch-size 256 \
+  --load-pseudo \
+  --pseudo-train-label-path <path-to-imagenet-pseudo-train-labels.pt> \
+  --pseudo-test-label-path <path-to-imagenet-pseudo-val-labels.pt>
+```
+
+## Generate Importance Scores with Pseudo-Labels
+
+After proxy training, `generate_importance_score.py` reads:
+
+```text
+<base-dir>/<task-name>/td-<task-name>.pickle
+```
+
+and writes:
+
+```text
+<base-dir>/<task-name>/data-score-<task-name>.pickle
+```
+
+Example:
 
 ```bash
 python generate_importance_score.py \
-  --dataset cifar10 \
+  --dataset cifar100 \
+  --data-dir ../data \
+  --base-dir ./data-model/cifar100 \
+  --task-name pseudo-rn18-200ep-full \
   --gpuid 0 \
-  --base-dir ./data-model/cifar10 \
-  --task-name ssl-pseudo-all-data \
   --load-pseudo \
-  --pseudo-train-label-path <path-to-ssl-pseudo-label.pt>
+  --pseudo-train-label-path <path-to-pseudo-train-labels.pt> \
+  --score-batch-size 8192 \
+  --td-window-size 10 \
+  --dual-T-list 30,60
 ```
 
-Finally, train with the selected coreset:
+For ImageNet-style TD logs, use `generate_importance_score_imagenet.py`. This script reads per-epoch TD files under `<base-dir>/<task-name>/training-dynamics/` and requires an explicit `--data-score-path`.
+
+```bash
+python generate_importance_score_imagenet.py \
+  --dataset imagenet \
+  --data-dir <path-to-imagenet-root> \
+  --base-dir ./data-model/imagenet \
+  --task-name pseudo-rn34-60ep-full \
+  --data-score-path ./data-model/imagenet/pseudo-rn34-60ep-full/data-score-pseudo-rn34-60ep-full.pickle \
+  --load-pseudo \
+  --pseudo-train-label-path <path-to-imagenet-pseudo-train-labels.pt> \
+  --pseudo-dual-window-size 10 \
+  --pseudo-dual-p 1.0 \
+  --pseudo-dual-max-epoch 60
+```
+
+## Train on a Selected Subset
+
+`train.py` coreset modes:
+
+- `random`: uniformly samples a subset; does not need `--data-score-path`.
+- `coreset`: sorts by `--coreset-key` and takes the top/bottom `--coreset-ratio`, controlled by `--data-score-descending`.
+- `stratified`: first removes likely mislabeled examples using `--mis-key`/`--mis-ratio`, then samples across score strata.
+- `budget`: SemiPrune AUM-style two-end pruning. It removes `--mis-ratio` low-quality examples by `--mis-key`, chops high-AUM examples outside the budget, and keeps the requested subset.
+- `dual_hard`: selects the largest `dual_T<T>` scores from the score pickle.
+- `dual_beta`: Semi-DUAL beta sampling. It combines DUAL uncertainty with a beta distribution over target-class probability.
+- `swav`: selects by prototypicality/k-means distance score.
+- `badge`: consumes BADGE JSONL output.
+- `hard`: selects the highest scores from a NumPy score array.
+- `abl`: loads a precomputed NumPy index array.
+
+`train_imagenet.py` supports `random`, `coreset`, `stratified`, and `budget`.
+
+### Semi-DUAL-Beta
 
 ```bash
 python train.py \
-  --dataset cifar10 \
+  --dataset cifar100 \
+  --data-dir ../data \
+  --base-dir ./data-model/cifar100 \
+  --task-name semi-dual-beta-r10-T60 \
   --gpuid 0 \
   --epochs 200 \
-  --task-name ssl-budget-0.1 \
-  --base-dir ./data-model/cifar10 \
+  --lr 0.1 \
+  --network resnet18 \
+  --batch-size 128 \
+  --coreset \
+  --coreset-mode dual_beta \
+  --data-score-path ./data-model/cifar100/pseudo-rn18-200ep-full/data-score-pseudo-rn18-200ep-full.pickle \
+  --coreset-ratio 0.1 \
+  --pseudo-dual-T 60 \
+  --pseudo-dual-p 1.0 \
+  --beta-cd 3.0 \
+  --ignore-td
+```
+
+### Semi-AUM-Cutoff
+
+```bash
+python train.py \
+  --dataset cifar100 \
+  --data-dir ../data \
+  --base-dir ./data-model/cifar100 \
+  --task-name semi-aum-cutoff-r10-m40 \
+  --gpuid 0 \
+  --epochs 200 \
+  --lr 0.1 \
+  --network resnet18 \
+  --batch-size 128 \
   --coreset \
   --coreset-mode budget \
-  --data-score-path ./data-model/cifar10/ssl-pseudo-all-data/data-score-ssl-pseudo-all-data.pickle \
+  --data-score-path ./data-model/cifar100/pseudo-rn18-200ep-full/data-score-pseudo-rn18-200ep-full.pickle \
+  --mis-key accumulated_margin \
+  --mis-data-score-descending 0 \
   --coreset-key accumulated_margin \
   --coreset-ratio 0.1 \
   --mis-ratio 0.4 \
   --ignore-td
 ```
 
-For forgetting-based selection, use `--coreset-key forgetting --data-score-descending 1`.
+ImageNet subset example with AUM cutoff:
 
-## ELFS Reference Workflow
+```bash
+python train_imagenet.py \
+  --dataset imagenet \
+  --data-dir <path-to-imagenet-root> \
+  --base-dir ./data-model/imagenet \
+  --task-name semi-aum-cutoff-r10-m30 \
+  --gpuid 0,1 \
+  --iterations 300000 \
+  --iterations-per-testing 5000 \
+  --lr 0.1 \
+  --scheduler cosine \
+  --network resnet34 \
+  --batch-size 256 \
+  --coreset \
+  --coreset-mode budget \
+  --data-score-path ./data-model/imagenet/pseudo-rn34-60ep-full/data-score-pseudo-rn34-60ep-full.pickle \
+  --coreset-key accumulated_margin \
+  --coreset-ratio 0.1 \
+  --mis-ratio 0.3 \
+  --ignore-td
+```
 
-ELFS does pseudo-label generation differently: it first generates pseudo-labels without ground-truth labels using pretrained embeddings and clustering heads, then uses those pseudo-labels to collect proxy training dynamics for coreset selection.
+## ELFS Baseline Reference
 
-### 1. Generate embeddings and nearest neighbors
+We also reference the ELFS implementation from [eltsai/elfs](https://github.com/eltsai/elfs.git), which provides label-free pseudo-label generation with pretrained embeddings and clustering heads.
 
-For example, to use DINO features on CIFAR10:
+The upstream ELFS usage is:
 
 ```bash
 python gen_embeds.py \
@@ -125,18 +232,6 @@ python gen_embeds.py \
   --dataset CIFAR10 \
   --batch_size 256
 ```
-
-Generated files are stored under:
-
-```text
-data/embeddings/CIFAR10-dino_vitb16/
-```
-
-The directory includes train/test embeddings, labels, nearest-neighbor indices, nearest-neighbor distances, and embedding mean/std files.
-
-### 2. Train cluster heads
-
-Train multiple clustering heads using the precomputed embeddings and KNN graph:
 
 ```bash
 export CUDA_VISIBLE_DEVICES=0
@@ -164,121 +259,22 @@ python train_cluster_heads.py \
   --optimizer adamw
 ```
 
-### 3. Generate pseudo-labels
-
 ```bash
 python eval_cluster.py --ckpt_folder "$outdir"
 ```
 
-The pseudo-labels are saved as:
+This produces pseudo-label files such as:
 
 ```text
 experiments/cifar10-dino/pseudo_label.pt
 experiments/cifar10-dino/pseudo_label-test.pt
 ```
 
-### 4. Collect training dynamics with pseudo-labels
-
-This step is required before ELFS coreset selection. Load the generated pseudo-labels with `--load-pseudo`.
-
-```bash
-python train.py \
-  --dataset cifar10 \
-  --gpuid 0 \
-  --epochs 200 \
-  --lr 0.1 \
-  --network resnet18 \
-  --batch-size 128 \
-  --task-name all-data \
-  --base-dir ./data-model/cifar10 \
-  --load-pseudo \
-  --pseudo-train-label-path experiments/cifar10-dino/pseudo_label.pt \
-  --pseudo-test-label-path experiments/cifar10-dino/pseudo_label-test.pt
-```
-
-This writes checkpoints, logs, and training dynamics to:
-
-```text
-./data-model/cifar10/all-data/
-```
-
-### 5. Calculate importance scores
-
-Compute ELFS data scores from the pseudo-label training dynamics:
-
-```bash
-python generate_importance_score.py \
-  --dataset cifar10 \
-  --gpuid 0 \
-  --base-dir ./data-model/cifar10 \
-  --task-name all-data \
-  --load-pseudo \
-  --pseudo-train-label-path experiments/cifar10-dino/pseudo_label.pt
-```
-
-The data score is saved as:
-
-```text
-./data-model/cifar10/all-data/data-score-all-data.pickle
-```
-
-### 6. Train with ELFS coreset selection
-
-```bash
-python train.py \
-  --dataset cifar10 \
-  --gpuid 0 \
-  --epochs 200 \
-  --task-name budget-0.1 \
-  --base-dir ./data-model/cifar10 \
-  --coreset \
-  --coreset-mode budget \
-  --data-score-path ./data-model/cifar10/all-data/data-score-all-data.pickle \
-  --coreset-key accumulated_margin \
-  --coreset-ratio 0.1 \
-  --mis-ratio 0.4 \
-  --ignore-td
-```
-
-Useful coreset modes include:
-
-- `random`
-- `coreset`
-- `stratified`
-- `swav`
-- `badge`
-- `budget`
-- `hard`
-
-
-## Corrupted Datasets
-
-Generate a corrupted CIFAR-100 train split:
-
-```bash
-python corrupt-cifar.py \
-  --root ../data \
-  --save-dir ../data/cifar-100-corrupt \
-  --per-corrupt-rate 0.06 \
-  --seed 0 \
-  --download
-```
-
-This creates:
-
-```text
-img.bin
-targets.bin
-```
-
-Use the generated image pickle with scripts that accept `--cifar100-c-path`.
+Then use those files with this repository's pseudo-label training, score generation, and subset-training commands above.
 
 ## Notes
 
-- `--base-dir` is required by supervised training and importance-score scripts because task outputs are composed as `<base-dir>/<task-name>`.
-- `--epochs` and `--iterations` are mutually exclusive in supervised training.
-- For CIFAR100-LT training, pass `--lt-if 0.1` or `--lt-if 0.01`.
-- For CIFAR10-C training, pass `--cifar10-c-path`.
-- For CIFAR100-C training, pass `--cifar100-c-path` unless the default local path is valid.
-- Generated `__pycache__`, checkpoints, embeddings, logs, and experiment outputs should generally not be committed.
->>>>>>> f3b29fb (Initial commit)
+- `--base-dir` and `--task-name` define the output directory as `<base-dir>/<task-name>`.
+- `--epochs` and `--iterations` are mutually exclusive.
+- Use `--ignore-td` for final subset training if you do not need another set of training dynamics.
+- Generated checkpoints, TD logs, embeddings, pseudo-labels, and data-score files should generally not be committed.
